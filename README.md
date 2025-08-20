@@ -13,11 +13,11 @@ I ran three Studio sessions for the 2-node crypto agent.
 - **No-tool path:** the model replied directly with an `assistant` message and no tool executed.
 
 
-tavily path
+notool path
 <img width="460" height="542" alt="notoolpath" src="https://github.com/user-attachments/assets/7b3bd7d3-a0f8-4d3c-a5c4-a93b62b71728" />
 
 pricetoll path
 <img width="466" height="605" alt="cpricepath" src="https://github.com/user-attachments/assets/e96caa92-5abf-49a5-ae2e-ac335159385c" />
 
-notool path
+tavily path
 <img width="484" height="642" alt="tavilypath" src="https://github.com/user-attachments/assets/8d279689-a31c-47d1-941f-658ae855315d" />
