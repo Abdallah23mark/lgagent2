@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/main.ts",
+    "demo-one": "PROMPT=\"$PROMPT\" tsx src/main.ts",
     "studio": "npx @langchain/langgraph-cli dev"
   },
   "dependencies": {

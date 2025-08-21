@@ -14,6 +14,7 @@ function extractString(x: unknown): string {
           if ("content" in m) return String(m.content ?? "");
           if ("text" in m) return String(m.text ?? "");
           if ("query" in m) return String(m.query ?? "");
+          if ("token" in m) return String(m.token ?? "");
         }
         try {
           return JSON.stringify(m);
@@ -29,6 +30,7 @@ function extractString(x: unknown): string {
     if ("content" in obj) return String(obj.content ?? "");
     if ("text" in obj) return String(obj.text ?? "");
     if ("query" in obj) return String(obj.query ?? "");
+    if ("token" in obj) return String(obj.token ?? "");
     try {
       return JSON.stringify(obj);
     } catch {
@@ -38,53 +40,100 @@ function extractString(x: unknown): string {
   return String(x ?? "");
 }
 
-// tavily
+// normalize whitespace/newlines
+function normalizeQuery(q: string) {
+  return q.replace(/\s+/g, " ").trim();
+}
+
+// tavily news tool
 async function rawCryptoNews(input: unknown): Promise<string> {
   if (!process.env.TAVILY_API_KEY) {
     throw new Error("TAVILY_API_KEY not set in environment");
   }
 
-  const query = extractString(input).trim();
-  if (!query) throw new Error("cryptoNewsTool: empty query");
+  let query = normalizeQuery(extractString(input));
+  if (!query) {
+    console.warn("[cryptoNewsTool] empty query → defaulting to 'latest crypto news'");
+    query = "latest crypto news";
+  }
 
+  // tavily safe default topic
   const tavily = new TavilySearch({
     apiKey: process.env.TAVILY_API_KEY,
     maxResults: 3,
-    topic: "crypto",
+    topic: "news", 
   });
 
-  const attempts: Array<{ name: string; fn: () => Promise<any> }> = [
-    { name: "invoke(query:string)", fn: () => (tavily as any).invoke?.(query) },
-    { name: "invoke({ query })", fn: () => (tavily as any).invoke?.({ query }) },
-    { name: "invoke({ input })", fn: () => (tavily as any).invoke?.({ input: query }) },
-    { name: "search(query:string)", fn: () => (tavily as any).search?.(query) },
-    { name: "search({ query })", fn: () => (tavily as any).search?.({ query }) },
-    { name: "search({ input })", fn: () => (tavily as any).search?.({ input: query }) },
-  ];
-
-  for (const attempt of attempts) {
-    if (typeof attempt.fn !== "function") continue;
+  // topic call helper
+  async function tryTavilyCall(topicToUse: string) {
     try {
-      const out = await attempt.fn();
-      if (!out) continue;
-      console.log(`[cryptoNewsTool] success with ${attempt.name}`);
-      return typeof out === "string" ? out : JSON.stringify(out, null, 2);
+      if (typeof (tavily as any).invoke === "function") {
+        return await (tavily as any).invoke?.({ query, topic: topicToUse });
+      }
+      if (typeof (tavily as any).search === "function") {
+        return await (tavily as any).search?.({ query, topic: topicToUse });
+      }
+      if (typeof (tavily as any).invoke === "function") {
+        return await (tavily as any).invoke?.(query);
+      }
+      return null;
     } catch (err: any) {
-      console.warn(`[cryptoNewsTool] ${attempt.name} failed: ${String(err?.message ?? err)}`);
+      const msg = String(err?.message ?? err);
+      if (/Invalid topic/i.test(msg) || /Invalid topic/i.test(JSON.stringify(err))) {
+        const e: any = new Error("InvalidTopic");
+        e.original = err;
+        throw e;
+      }
+      throw err;
     }
   }
 
-  throw new Error(`cryptoNewsTool: all invocation shapes failed for query="${query}"`);
+  // try news then fallback to general
+  try {
+    const out = await tryTavilyCall("news");
+    if (out) {
+      console.log("[cryptoNewsTool] success (news)");
+      return typeof out === "string" ? out : JSON.stringify(out, null, 2);
+    }
+  } catch (err: any) {
+    if (err?.message === "InvalidTopic") {
+      console.warn("[cryptoNewsTool] 'news' topic invalid, retrying with 'general'");
+      try {
+        const out2 = await tryTavilyCall("general");
+        if (out2) {
+          console.log("[cryptoNewsTool] success (general)");
+          return typeof out2 === "string" ? out2 : JSON.stringify(out2, null, 2);
+        }
+      } catch (err2: any) {
+        console.warn("[cryptoNewsTool] retry with general failed:", err2?.message ?? err2);
+      }
+    } else {
+      console.warn("[cryptoNewsTool] tavily 'news' attempt failed:", err?.message ?? err);
+    }
+  }
+
+  // final option try finance
+  try {
+    const out3 = await tryTavilyCall("finance");
+    if (out3) {
+      console.log("[cryptoNewsTool] success (finance)");
+      return typeof out3 === "string" ? out3 : JSON.stringify(out3, null, 2);
+    }
+  } catch (err3: any) {
+    console.warn("[cryptoNewsTool] finance attempt failed:", err3?.message ?? err3);
+  }
+
+  return `Tavily search failed for "${query}". Please try a different phrasing or ensure the Tavily API key is valid.`;
 }
 
 export const cryptoNewsTool = tool(rawCryptoNews, {
   name: "cryptoNewsTool",
-  description: "Fetch latest crypto-related news using Tavily",
+  description: "Fetch latest crypto-related news using Tavily (safe topic fallback).",
   schema: z.string().describe("A search query about crypto news"),
 });
 
 // price tool
-const cryptoPriceInputSchema = z.string().nonempty();
+const cryptoPriceInputSchema = z.union([z.string(), z.object({ token: z.string() })]);
 
 const COINGECKO_MAP: Record<string, string> = {
   bitcoin: "bitcoin",
@@ -107,29 +156,52 @@ async function fetchCoinGeckoPrice(id: string): Promise<string | null> {
       id
     )}&vs_currencies=usd`;
     const res = await fetch(url);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[cryptoPriceTool] CoinGecko HTTP ${res.status} for id=${id}`);
+      return null;
+    }
     const json = await res.json();
     const price = json?.[id]?.usd;
     return typeof price === "number" ? `$${price.toLocaleString("en-US")}` : null;
-  } catch {
+  } catch (err: any) {
+    console.warn(`[cryptoPriceTool] CoinGecko fetch failed: ${err?.message ?? err}`);
     return null;
   }
 }
 
 async function rawCryptoPrice(input: unknown): Promise<string> {
-  const symbol = cryptoPriceInputSchema.parse(input);
-  const key = symbol.toLowerCase().trim();
+  let parsed: any;
+  try {
+    parsed = cryptoPriceInputSchema.parse(input);
+  } catch {
+    parsed = extractString(input);
+  }
+
+  const symbol = typeof parsed === "string" ? parsed : parsed.token ?? String(parsed);
+  const key = String(symbol).toLowerCase().trim();
   const id = COINGECKO_MAP[key] ?? key;
 
-  if (!process.env.COINGECKO_DISABLED) {
+  const coingeckoDisabled =
+    process.env.COINGECKO_DISABLED === "1" || process.env.COINGECKO_DISABLED === "true";
+
+  if (!coingeckoDisabled) {
     const live = await fetchCoinGeckoPrice(id);
-    if (live) return live;
+    if (live) {
+      console.log(`[cryptoPriceTool] CoinGecko price for ${id}: ${live}`);
+      return live;
+    }
+    console.warn(`[cryptoPriceTool] CoinGecko returned no price for ${id}, falling back to mock`);
+  } else {
+    console.log("[cryptoPriceTool] CoinGecko disabled by environment");
   }
-  return MOCK_PRICES[id] ?? MOCK_PRICES[key] ?? "Price not available (mock)";
+
+  const mock = MOCK_PRICES[id] ?? MOCK_PRICES[key] ?? "Price not available (mock)";
+  console.log(`[cryptoPriceTool] returning mock price for ${key}: ${mock}`);
+  return mock;
 }
 
 export const cryptoPriceTool = tool(rawCryptoPrice, {
   name: "cryptoPriceTool",
-  description: "Get live or mock crypto prices by symbol or coin name",
+  description: "Get live or mock crypto prices by symbol or coin name. Accepts string or { token } input.",
   schema: cryptoPriceInputSchema,
 });

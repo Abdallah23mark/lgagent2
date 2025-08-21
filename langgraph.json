@@ -2,7 +2,7 @@
   "node_version": "20",
   "dependencies": ["."],
   "graphs": {
-    "agent": "./src/graph.ts:cryptoGraph"
+    "agent": "./src/graph.ts:graph"
   },
   "env": ".env"
 }
